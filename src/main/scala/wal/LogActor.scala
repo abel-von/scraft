@@ -1,11 +1,13 @@
 package wal
 
 import java.io.{File, RandomAccessFile}
+import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel.MapMode
 
 import akka.actor.{Actor, ActorLogging}
 
 import scala.annotation.tailrec
+import scala.util.Try
 
 /**
   * Created by pheng on 2017/11/26.
@@ -14,6 +16,8 @@ case class LogEntry(index: Long, cmd: Command)
 
 trait Command
 
+object CurrentLogs
+
 trait CommandSerializer[T <: Command] {
   def cmdToBytes(cmd: T): Array[Byte]
 
@@ -21,10 +25,10 @@ trait CommandSerializer[T <: Command] {
 }
 
 class LogActor(path: String, cs: CommandSerializer[Command]) extends Actor with ActorLogging {
-  val f = new File(path)
+  var f = new File(path)
   val exists = f.exists()
-  val fc = new RandomAccessFile(new File(path), "rw").getChannel
-  val buf = fc.map(MapMode.READ_WRITE, 0, LogActor.BUFFER_SIZE)
+  var fc = new RandomAccessFile(f, "rw").getChannel
+  var buf = fc.map(MapMode.READ_WRITE, 0, LogActor.BUFFER_SIZE)
   val bufferedLogs: Seq[LogEntry] = if (exists) {
     replay(Seq.empty[LogEntry])
   } else {
@@ -54,12 +58,29 @@ class LogActor(path: String, cs: CommandSerializer[Command]) extends Actor with 
     case LogEntry(index, cmd) =>
       log.info(s"Received log entry of index:$index")
       val bytes = cs.cmdToBytes(cmd)
+      val expandedSize = buf.position() + bytes.length + java.lang.Long.BYTES + java.lang.Integer.BYTES
+      if (expandedSize > LogActor.BUFFER_SIZE) {
+        cut()
+      }
       buf.putInt(bytes.length + java.lang.Long.BYTES)
       buf.putLong(index)
       buf.put(bytes)
       buf.force()
+    case CurrentLogs =>
+      sender() ! bufferedLogs
   }
 
+  override def postStop() = {
+    fc.close()
+  }
+
+  private def cut() = {
+    fc.close()
+    f.renameTo(new File(path + "_" + System.currentTimeMillis()))
+    f = new File(path)
+    fc = new RandomAccessFile(f, "rw").getChannel
+    buf = fc.map(MapMode.READ_WRITE, 0, LogActor.BUFFER_SIZE)
+  }
 }
 
 object LogActor {

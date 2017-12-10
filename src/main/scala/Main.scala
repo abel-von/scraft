@@ -9,18 +9,15 @@ object Main {
   def main(args: Array[String]) {
 
     val (memberId: String, port: String) = args match {
-      case Array(id, port) => {
-        (id, port)
-      }
-      case Array(id) => {
+      case Array(id, p) =>
+        (id, p)
+      case Array(id) =>
         (id, "0")
-      }
-      case _ => {
+      case _ =>
         println("args is not legal")
         System.exit(1)
-      }
     }
-    println(s"id: ${memberId}, port: ${port}")
+    println(s"id: $memberId, port: $port")
     val config = ConfigFactory.parseString(s"akka.remote.netty.tcp.port=$port").
       withFallback(ConfigFactory.load("raft"))
     val system = ActorSystem("Raft", config)

@@ -52,7 +52,7 @@ class KVCommandSerializer extends wal.CommandSerializer[KVCommand] {
   }
 
   def stringToByteArray(s: String): Array[Byte] = {
-    val strBytes = s.foldLeft(Array.empty[Byte]: Array[Byte])(_ :+ _.toByte)
+    val strBytes = s.foldLeft(Array.empty[Byte])(_ :+ _.toByte)
     intToByteArray(strBytes.length) ++ strBytes
   }
 

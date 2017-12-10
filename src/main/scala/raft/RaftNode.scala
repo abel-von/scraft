@@ -18,10 +18,11 @@ object Follower extends RaftNodeState
 object Leader extends RaftNodeState
 
 final case class StatusData(term: Int,
+                            logIndex: Long,
                             leaderId: String = "",
                             votes: Map[String, Boolean] = Map.empty)
 
-final case class Vote(id: String, term: Int, logTerm: Int, logIndex: Int)
+final case class Vote(id: String, term: Int, logTerm: Int, logIndex: Long)
 
 final case class Heartbeat(id: String, term: Int)
 
@@ -47,11 +48,11 @@ class RaftNode(id: String,
   val messageActorRef = context.actorOf(Props(classOf[MessageActor], id, members))
   var heartbeatElapsed = 0
 
-  startWith(Candidate, StatusData(0))
+  startWith(Candidate, StatusData(0, 0))
   setTimer(s"champaign-timer-$id", Campaign, 5.seconds + Random.nextInt(5).seconds, repeat = false)
 
   when(Candidate) {
-    case Event(vote@Vote(voteId, voteTerm, logTerm, logIndex), StatusData(selfTerm, leaderId, _))
+    case Event(vote@Vote(voteId, voteTerm, logTerm, logIndex), StatusData(selfTerm, selfIndex, leaderId, _))
       if shouldGrant(vote, selfTerm) =>
       sender() ! VoteResponse(id, grant = true)
       log.info(s"Received vote from sender ${sender()}")
@@ -59,8 +60,8 @@ class RaftNode(id: String,
       setTimer(s"beat-timer-$id", Beat, 1 seconds, repeat = false)
       heartbeatElapsed = 0
       log.info(s"Member $id become follower because received the vote of $voteId with the term $voteTerm")
-      goto(Follower) using StatusData(voteTerm, voteId)
-    case Event(VoteResponse(voterId, true), StatusData(term, _, votes)) =>
+      goto(Follower) using StatusData(voteTerm, selfIndex, voteId)
+    case Event(VoteResponse(voterId, true), StatusData(term, selfIndex, _, votes)) =>
       val newVotes = votes + (voterId -> true)
       log.info(s"Member $id received vote from $voterId")
       val grantCount = newVotes.count(_._2)
@@ -69,9 +70,9 @@ class RaftNode(id: String,
         log.info(s"$id become leader")
         cancelTimer(s"campaign-timer-$id")
         setTimer(s"beat-timer-$id", Beat, 1 seconds, repeat = false)
-        goto(Leader) using StatusData(term, id, newVotes)
+        goto(Leader) using StatusData(term, selfIndex, id, newVotes)
       } else {
-        stay() using StatusData(term, id, newVotes)
+        stay() using StatusData(term, selfIndex, id, newVotes)
       }
     case Event(Campaign, stateData) =>
       log.info(s"Member $id start campaign")
@@ -83,7 +84,7 @@ class RaftNode(id: String,
     case Event(Heartbeat(fromId, term), stateData) if term > stateData.term =>
       log.info(s"Received messages from a new leader $fromId with higher term")
       heartbeatElapsed = 0
-      goto(Follower) using StatusData(term, fromId)
+      goto(Follower) using StatusData(term, stateData.logIndex, fromId)
     case e =>
       log.info(s"Member $id received event $e, and do nothing")
       stay()
@@ -92,12 +93,12 @@ class RaftNode(id: String,
   when(Follower) {
     case Event(Append(entry), stateData) =>
       stay()
-    case Event(vote@Vote(voteId, term, logTerm, logIndex), StatusData(selfTerm, leaderId, _)) =>
+    case Event(vote@Vote(voteId, term, logTerm, logIndex), StatusData(selfTerm, selfIndex, leaderId, _)) =>
       log.info(s"Member $id received campaign from $voteId: $vote")
       if (shouldGrant(vote, selfTerm)) {
         log.info(s"Member $id received campaign from $voteId and vote for it")
         sender() ! VoteResponse(id, grant = true)
-        stay() using StatusData(term, voteId)
+        stay() using StatusData(term, selfIndex, voteId)
       } else {
         log.info(s"Member $id received campaign from $voteId and reject it")
         sender() ! VoteResponse(id, grant = false)
@@ -109,29 +110,32 @@ class RaftNode(id: String,
       stay()
     case Event(Heartbeat(fromId, term), stateData) if term > stateData.term =>
       log.info(s"Received messages from a new leader $fromId with higher term")
-      stay() using StatusData(term, fromId)
+      stay() using StatusData(term, stateData.logIndex, fromId)
     case Event(Beat, stateData) =>
       heartbeatElapsed = heartbeatElapsed + 1
       if (heartbeatElapsed >= RaftNode.HEARTBEAT_TIMEOUT) {
         log.info(s"Member $id waited timeout, become candidate and start new campaign")
         cancelTimer(s"beat-timer-$id")
         setTimer(s"champaign-timer-$id", Campaign, 5.seconds + Random.nextInt(5).seconds, repeat = false)
-        goto(Candidate) using StatusData(stateData.term)
+        goto(Candidate) using StatusData(stateData.term, stateData.logIndex)
       } else {
         setTimer(s"beat-timer-$id", Beat, 1 seconds, repeat = false)
         stay()
       }
+    case e =>
+      log.info(s"Member $id received event $e, and do nothing")
+      stay()
   }
 
   when(Leader) {
     case Event(Propose(entry), _) =>
       stay()
-    case Event(vote@Vote(voteId, term, logTerm, logIndex), StatusData(selfTerm, leaderId, _))
+    case Event(vote@Vote(voteId, term, logTerm, logIndex), StatusData(selfTerm, selfIndex, leaderId, _))
       if shouldGrant(vote, selfTerm) =>
       sender() ! VoteResponse(id, grant = true)
       log.info(s"Member $id become follower because received campaign from $voteId")
       heartbeatElapsed = 0
-      goto(Follower) using StatusData(term, voteId)
+      goto(Follower) using StatusData(term, selfIndex, voteId)
     case Event(Beat, stateData) =>
       messageActorRef ! SendToAll(Heartbeat(id, stateData.term))
       setTimer(s"beat-timer-$id", Beat, 1 seconds, repeat = false)
@@ -139,8 +143,11 @@ class RaftNode(id: String,
     case Event(Heartbeat(fromId, term), stateData) if term > stateData.term =>
       log.info(s"Received messages from a new leader $fromId with higher term")
       heartbeatElapsed = 0
-      goto(Follower) using StatusData(term, fromId)
+      goto(Follower) using StatusData(term, stateData.logIndex, fromId)
     case Event(Heartbeat(fromId, _), stateData) if fromId == this.id =>
+      stay()
+    case e =>
+      log.info(s"Member $id received event $e, and do nothing")
       stay()
   }
 
